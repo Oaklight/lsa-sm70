@@ -50,7 +50,7 @@ The serving path, written here against those semantics:
 
 ## Integration
 
-The component is selected with `SGLANG_RESTOMOD_COMPONENTS=lsa_sm70`. It is
+Installing the package registers an `sglang.srt.plugins` entry point. It is
 additive: no upstream file is edited and no patch is added. The backend is
 registered as `--attention-backend lsa_sm70`, replaces the full-attention
 layers of a hybrid model, and leaves the linear-attention layers to the
@@ -71,6 +71,7 @@ reference uses when its CuTeDSL kernels are unavailable.
 | `LsaSm70Backend` and Qwen wiring | written here, end-to-end on 4x V100 |
 | Triton scan/top-p and expansion | written here, GPU-tested against the oracle |
 | CUDA graph capture | refused; the selection is host-orchestrated |
-| signed GPU receipt | evidence packed, signing pending the operator key |
+| signed GPU receipt | tracked in `Oaklight/sglang-restomod`; evidence packed, signing pending |
 
-No numbers are claimed in `COMPATIBILITY.md` until a receipted run exists.
+The measured run is described in `README.md`; the signed receipt lives with
+the integration repository, where the GPU receipt gate runs.
