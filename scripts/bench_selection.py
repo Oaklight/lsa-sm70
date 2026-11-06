@@ -120,6 +120,61 @@ def _graph_check(step, mutate, *, warmup: int, iters: int) -> None:
     )
 
 
+def _case(design: LsaDesign, context: int, batch: int, args: argparse.Namespace) -> None:
+    """One (context, batch) row: time the three stages and optionally capture."""
+    index = _build_index(design, context)
+    buckets = index.buckets()
+    keys = _unit(context + 1, HEAD_DIM, seed=1).reshape(context + 1, KV_HEADS, HEAD_DIM)
+    values = _unit(context + 1, HEAD_DIM, seed=2).reshape(context + 1, KV_HEADS, HEAD_DIM)
+    next_key = _unit(1, INDEX_DIM, seed=3)
+    queries = _unit(batch, INDEX_DIM, seed=4)
+    positions = torch.full((batch,), context - 1, dtype=torch.int64, device="cuda")
+    attention_queries = _unit(batch * QUERY_HEADS, HEAD_DIM, seed=5).reshape(
+        batch, QUERY_HEADS, HEAD_DIM
+    )
+
+    def index_step():
+        # One appended key, then the table rebuild the backend does a layer.
+        index.append(next_key)
+        index.buckets()
+        index.open.pop()
+        index.open_count -= 1
+
+    def select_step():
+        return select_lists(
+            queries,
+            positions,
+            buckets,
+            top_p=design.top_p,
+            top_k=design.top_k,
+            sink_size=design.sink_size,
+            window_size=design.window_size,
+        )
+
+    lists, lengths = select_step()
+
+    def read_step():
+        return lsa_sparse_read(attention_queries, keys, values, lists, lengths, SCALE)
+
+    def step():
+        return _step(queries, positions, buckets, attention_queries, keys, values, design)
+
+    def mutate():
+        positions.add_(1)
+
+    index_ms = _timed(index_step, warmup=args.warmup, iters=args.iters)
+    select_ms = _timed(select_step, warmup=args.warmup, iters=args.iters)
+    read_ms = _timed(read_step, warmup=args.warmup, iters=args.iters)
+    total = index_ms + select_ms + read_ms
+    print(
+        f"{context:>7} {batch:>3} {index_ms:>9.3f} {select_ms:>10.3f} "
+        f"{read_ms:>8.3f} {total:>9.3f} {100 * index_ms / total:>7.1f} "
+        f"{100 * select_ms / total:>8.1f} {100 * read_ms / total:>6.1f}"
+    )
+    if args.graph:
+        _graph_check(step, mutate, warmup=args.warmup, iters=20)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--context", type=int, nargs="+", default=[8192, 32768])
@@ -146,68 +201,8 @@ def main() -> int:
         if context % design.cluster_block_size:
             print(f"skip {context}: not a multiple of {design.cluster_block_size}")
             continue
-        index = _build_index(design, context)
-        buckets = index.buckets()
-        keys = _unit(context + 1, HEAD_DIM, seed=1).reshape(context + 1, KV_HEADS, HEAD_DIM)
-        values = _unit(context + 1, HEAD_DIM, seed=2).reshape(context + 1, KV_HEADS, HEAD_DIM)
-        next_key = _unit(1, INDEX_DIM, seed=3)
-
-        def index_step():
-            # One appended key, then the table rebuild the backend does a layer.
-            index.append(next_key)
-            index.buckets()
-            index.open.pop()
-            index.open_count -= 1
-
         for batch in args.batch:
-            queries = _unit(batch, INDEX_DIM, seed=4)
-            positions = torch.full((batch,), context - 1, dtype=torch.int64, device="cuda")
-
-            def select_step():
-                return select_lists(
-                    queries,
-                    positions,
-                    buckets,
-                    top_p=design.top_p,
-                    top_k=design.top_k,
-                    sink_size=design.sink_size,
-                    window_size=design.window_size,
-                )
-
-            lists, lengths = select_step()
-            attention_queries = _unit(batch * QUERY_HEADS, HEAD_DIM, seed=5).reshape(
-                batch, QUERY_HEADS, HEAD_DIM
-            )
-
-            def read_step():
-                return lsa_sparse_read(
-                    attention_queries, keys, values, lists, lengths, SCALE
-                )
-
-            index_ms = _timed(index_step, warmup=args.warmup, iters=args.iters)
-            select_ms = _timed(select_step, warmup=args.warmup, iters=args.iters)
-            read_ms = _timed(read_step, warmup=args.warmup, iters=args.iters)
-            total = index_ms + select_ms + read_ms
-            print(
-                f"{context:>7} {batch:>3} {index_ms:>9.3f} {select_ms:>10.3f} "
-                f"{read_ms:>8.3f} {total:>9.3f} {100 * index_ms / total:>7.1f} "
-                f"{100 * select_ms / total:>8.1f} {100 * read_ms / total:>6.1f}"
-            )
-            if args.graph:
-                _graph_check(
-                    lambda: _step(
-                        queries,
-                        positions,
-                        buckets,
-                        attention_queries,
-                        keys,
-                        values,
-                        design,
-                    ),
-                    lambda: positions.add_(1),
-                    warmup=args.warmup,
-                    iters=20,
-                )
+            _case(design, context, batch, args)
     return 0
 
 
